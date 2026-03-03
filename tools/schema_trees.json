@@ -1,0 +1,121 @@
+{
+  "SchemaValidationReport": {
+    "entry_class": "com.example.schemaguard.domain.model.entity.SchemaValidationReport",
+    "entry_file": "com/example/schemaguard/domain/model/entity/SchemaValidationReport.kt",
+    "downstream_files": [
+      "com/example/schemaguard/domain/model/entity/ChangedFileInfo.kt",
+      "com/example/schemaguard/domain/model/entity/ErrorSeverity.kt",
+      "com/example/schemaguard/domain/model/entity/FieldChange.kt",
+      "com/example/schemaguard/domain/model/entity/FieldModification.kt",
+      "com/example/schemaguard/domain/model/entity/FileChangeType.kt",
+      "com/example/schemaguard/domain/model/entity/FileValidationResult.kt",
+      "com/example/schemaguard/domain/model/entity/ReportSummary.kt",
+      "com/example/schemaguard/domain/model/entity/SchemaDiff.kt",
+      "com/example/schemaguard/domain/model/entity/SchemaDiffType.kt",
+      "com/example/schemaguard/domain/model/entity/SchemaValidationReport.kt",
+      "com/example/schemaguard/domain/model/entity/ValidationError.kt",
+      "com/example/schemaguard/domain/model/entity/ValidationStatus.kt",
+      "com/example/schemaguard/domain/model/entity/ValidationWarning.kt"
+    ],
+    "tree": {
+      "class": "SchemaValidationReport",
+      "qualified_name": "com.example.schemaguard.domain.model.entity.SchemaValidationReport",
+      "kind": "DATA_CLASS",
+      "source_file": "com/example/schemaguard/domain/model/entity/SchemaValidationReport.kt",
+      "children": [
+        {
+          "class": "overallStatus: ValidationStatus",
+          "qualified_name": "com.example.schemaguard.domain.model.entity.ValidationStatus",
+          "kind": "ENUM",
+          "source_file": "com/example/schemaguard/domain/model/entity/ValidationStatus.kt"
+        },
+        {
+          "class": "summary: ReportSummary",
+          "qualified_name": "com.example.schemaguard.domain.model.entity.ReportSummary",
+          "kind": "DATA_CLASS",
+          "source_file": "com/example/schemaguard/domain/model/entity/ReportSummary.kt"
+        },
+        {
+          "class": "fileResults: List\u003cFileValidationResult\u003e",
+          "qualified_name": "com.example.schemaguard.domain.model.entity.FileValidationResult",
+          "kind": "LIST",
+          "source_file": "com/example/schemaguard/domain/model/entity/FileValidationResult.kt",
+          "children": [
+            {
+              "class": "status: ValidationStatus",
+              "qualified_name": "com.example.schemaguard.domain.model.entity.ValidationStatus",
+              "kind": "ENUM",
+              "source_file": "com/example/schemaguard/domain/model/entity/ValidationStatus.kt"
+            },
+            {
+              "class": "errors: List\u003cValidationError\u003e",
+              "qualified_name": "com.example.schemaguard.domain.model.entity.ValidationError",
+              "kind": "LIST",
+              "source_file": "com/example/schemaguard/domain/model/entity/ValidationError.kt",
+              "children": [
+                {
+                  "class": "severity: ErrorSeverity",
+                  "qualified_name": "com.example.schemaguard.domain.model.entity.ErrorSeverity",
+                  "kind": "ENUM",
+                  "source_file": "com/example/schemaguard/domain/model/entity/ErrorSeverity.kt"
+                }
+              ]
+            },
+            {
+              "class": "warnings: List\u003cValidationWarning\u003e",
+              "qualified_name": "com.example.schemaguard.domain.model.entity.ValidationWarning",
+              "kind": "LIST",
+              "source_file": "com/example/schemaguard/domain/model/entity/ValidationWarning.kt"
+            }
+          ]
+        },
+        {
+          "class": "changedFiles: List\u003cChangedFileInfo\u003e",
+          "qualified_name": "com.example.schemaguard.domain.model.entity.ChangedFileInfo",
+          "kind": "LIST",
+          "source_file": "com/example/schemaguard/domain/model/entity/ChangedFileInfo.kt",
+          "children": [
+            {
+              "class": "changeType: FileChangeType",
+              "qualified_name": "com.example.schemaguard.domain.model.entity.FileChangeType",
+              "kind": "ENUM",
+              "source_file": "com/example/schemaguard/domain/model/entity/FileChangeType.kt"
+            }
+          ]
+        },
+        {
+          "class": "schemaDiffs: List\u003cSchemaDiff\u003e",
+          "qualified_name": "com.example.schemaguard.domain.model.entity.SchemaDiff",
+          "kind": "LIST",
+          "source_file": "com/example/schemaguard/domain/model/entity/SchemaDiff.kt",
+          "children": [
+            {
+              "class": "diffType: SchemaDiffType",
+              "qualified_name": "com.example.schemaguard.domain.model.entity.SchemaDiffType",
+              "kind": "ENUM",
+              "source_file": "com/example/schemaguard/domain/model/entity/SchemaDiffType.kt"
+            },
+            {
+              "class": "addedFields: List\u003cFieldChange\u003e",
+              "qualified_name": "com.example.schemaguard.domain.model.entity.FieldChange",
+              "kind": "LIST",
+              "source_file": "com/example/schemaguard/domain/model/entity/FieldChange.kt"
+            },
+            {
+              "class": "removedFields: List\u003cFieldChange\u003e",
+              "qualified_name": "com.example.schemaguard.domain.model.entity.FieldChange",
+              "kind": "LIST",
+              "source_file": "com/example/schemaguard/domain/model/entity/FieldChange.kt"
+            },
+            {
+              "class": "modifiedFields: List\u003cFieldModification\u003e",
+              "qualified_name": "com.example.schemaguard.domain.model.entity.FieldModification",
+              "kind": "LIST",
+              "source_file": "com/example/schemaguard/domain/model/entity/FieldModification.kt"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SchemaGuard — Dependency Graph</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+        }
+
+        /* ─── Top Bar ─── */
+        .topbar {
+            display: flex; align-items: center; gap: 16px;
+            padding: 12px 24px;
+            background: #161b22;
+            border-bottom: 1px solid #21262d;
+            flex-wrap: wrap;
+        }
+        .topbar h1 { font-size: 16px; color: #58a6ff; font-weight: 700; }
+        .topbar .sep { width: 1px; height: 24px; background: #30363d; }
+
+        .topbar button, .topbar .tab-btn {
+            background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+            padding: 5px 12px; border-radius: 6px; cursor: pointer;
+            font-size: 12px; font-family: inherit; transition: all 0.15s;
+        }
+        .topbar button:hover, .topbar .tab-btn:hover { background: #30363d; }
+        .topbar .tab-btn.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+        .search-box {
+            background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
+            padding: 5px 10px; border-radius: 6px; font-size: 12px;
+            font-family: inherit; width: 200px;
+        }
+        .search-box::placeholder { color: #484f58; }
+        .search-box:focus { outline: none; border-color: #1f6feb; }
+
+        .file-input-wrapper { position: relative; display: inline-block; }
+        .file-input-wrapper input[type="file"] {
+            position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer;
+        }
+
+        /* ─── Stats Bar ─── */
+        .stats-bar {
+            display: flex; gap: 24px; padding: 10px 24px;
+            background: #0d1117; border-bottom: 1px solid #21262d;
+        }
+        .stat { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+        .stat-val { font-weight: 700; color: #58a6ff; font-size: 14px; }
+        .stat-lbl { color: #8b949e; }
+
+        .legend { display: flex; gap: 14px; margin-left: auto; align-items: center; }
+        .legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #8b949e; }
+        .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+
+        /* ─── Main Layout ─── */
+        .main { display: flex; height: calc(100vh - 96px); }
+
+        /* ─── Graph Canvas ─── */
+        .graph-viewport {
+            flex: 1; overflow: auto; position: relative;
+            cursor: grab;
+        }
+        .graph-viewport:active { cursor: grabbing; }
+        .graph-viewport.dragging { cursor: grabbing; }
+
+        .graph-world {
+            position: relative;
+            min-width: 100%;
+            min-height: 100%;
+            padding: 40px;
+            transform-origin: 0 0;
+        }
+
+        /* SVG connectors layer */
+        .graph-svg {
+            position: absolute; top: 0; left: 0;
+            pointer-events: none;
+            overflow: visible;
+        }
+        .graph-svg line {
+            stroke: #30363d; stroke-width: 2;
+        }
+        .graph-svg path {
+            stroke: #30363d; stroke-width: 2; fill: none;
+        }
+        .graph-svg .edge-highlight {
+            stroke: #1f6feb; stroke-width: 2.5;
+        }
+
+        /* ─── Graph Nodes ─── */
+        .graph-node {
+            position: absolute;
+            background: #161b22;
+            border: 1.5px solid #30363d;
+            border-radius: 10px;
+            padding: 10px 14px;
+            cursor: pointer;
+            transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+            display: flex; align-items: center; gap: 8px;
+            white-space: nowrap;
+            user-select: none;
+            z-index: 1;
+        }
+        .graph-node:hover {
+            border-color: #484f58;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            z-index: 2;
+        }
+        .graph-node.highlight {
+            border-color: #1f6feb;
+            box-shadow: 0 0 0 3px #1f6feb33, 0 4px 16px rgba(0,0,0,0.4);
+            z-index: 3;
+        }
+        .graph-node.collapsed-node { opacity: 0.7; }
+
+        .graph-node.root-node {
+            border-color: #58a6ff;
+            background: #0d1117;
+            box-shadow: 0 0 0 2px #1f6feb33;
+        }
+
+        /* Kind-specific border accent */
+        .graph-node.kind-data   { border-left: 3px solid #58a6ff; }
+        .graph-node.kind-enum   { border-left: 3px solid #f78166; }
+        .graph-node.kind-list   { border-left: 3px solid #3fb950; }
+        .graph-node.kind-prim   { border-left: 3px solid #8b949e; }
+
+        .node-badge {
+            width: 24px; height: 24px; border-radius: 6px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 11px; font-weight: 700; flex-shrink: 0;
+        }
+        .badge-data { background: #1f6feb22; color: #58a6ff; }
+        .badge-enum { background: #f7816622; color: #f78166; }
+        .badge-list { background: #3fb95022; color: #3fb950; }
+        .badge-prim { background: #8b949e22; color: #8b949e; }
+
+        .node-info { display: flex; flex-direction: column; gap: 2px; }
+        .node-name { font-size: 13px; font-weight: 600; color: #e6edf3; }
+        .node-file { font-size: 10px; color: #484f58; font-family: 'SF Mono', monospace; }
+
+        .node-expand {
+            width: 18px; height: 18px; border-radius: 50%;
+            background: #21262d; border: 1px solid #30363d;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 10px; color: #8b949e; margin-left: 4px;
+            flex-shrink: 0;
+        }
+
+        /* ─── Sidebar ─── */
+        .sidebar {
+            width: 300px; background: #161b22; border-left: 1px solid #21262d;
+            display: flex; flex-direction: column; flex-shrink: 0;
+            overflow: hidden;
+        }
+        .sidebar-title {
+            font-size: 11px; color: #8b949e; text-transform: uppercase;
+            letter-spacing: 0.5px; padding: 12px 16px 8px;
+            border-bottom: 1px solid #21262d;
+        }
+        .sidebar-scroll { flex: 1; overflow-y: auto; padding: 8px; }
+
+        .file-item {
+            display: flex; align-items: center; gap: 8px;
+            padding: 5px 8px; border-radius: 4px; font-size: 12px;
+            transition: background 0.1s; cursor: default;
+        }
+        .file-item:hover { background: #1c2128; }
+        .file-item.matched { background: #3fb95015; color: #3fb950; }
+        .file-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .dot-data { background: #58a6ff; }
+        .dot-enum { background: #f78166; }
+        .file-short { color: #c9d1d9; font-size: 12px; }
+
+        .diff-section { padding: 12px; border-top: 1px solid #21262d; }
+        .diff-input {
+            width: 100%; background: #0d1117; border: 1px solid #30363d;
+            color: #c9d1d9; padding: 8px 10px; border-radius: 6px;
+            font-family: 'SF Mono', monospace; font-size: 11px;
+            resize: vertical; min-height: 50px;
+        }
+        .diff-input::placeholder { color: #484f58; }
+        .diff-input:focus { outline: none; border-color: #1f6feb; }
+        .diff-btn {
+            margin-top: 6px; background: #21262d; color: #c9d1d9;
+            border: 1px solid #30363d; padding: 4px 12px; border-radius: 6px;
+            cursor: pointer; font-size: 11px; font-family: inherit;
+        }
+        .diff-btn:hover { background: #30363d; }
+        .diff-result { margin-top: 8px; padding: 8px; border-radius: 6px; font-size: 11px; }
+        .diff-match { background: #3fb95015; border: 1px solid #3fb95033; color: #3fb950; }
+        .diff-no-match { background: #8b949e15; border: 1px solid #8b949e33; color: #8b949e; }
+
+        /* Zoom controls */
+        .zoom-controls {
+            position: absolute; bottom: 16px; right: 332px;
+            display: flex; gap: 4px; z-index: 10;
+        }
+        .zoom-btn {
+            width: 32px; height: 32px; border-radius: 8px;
+            background: #161b22; border: 1px solid #30363d;
+            color: #c9d1d9; font-size: 16px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.1s;
+        }
+        .zoom-btn:hover { background: #21262d; }
+        .zoom-label {
+            height: 32px; padding: 0 10px; border-radius: 8px;
+            background: #161b22; border: 1px solid #30363d;
+            color: #8b949e; font-size: 11px;
+            display: flex; align-items: center;
+        }
+
+        @media (max-width: 900px) {
+            .sidebar { display: none; }
+            .zoom-controls { right: 16px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <h1>SchemaGuard</h1>
+        <div class="sep"></div>
+        <div id="tabs"></div>
+        <div class="sep"></div>
+        <div class="file-input-wrapper">
+            <button>Load JSON</button>
+            <input type="file" id="fileInput" accept=".json">
+        </div>
+        <button id="expandAllBtn">Expand All</button>
+        <button id="collapseAllBtn">Collapse All</button>
+        <button id="fitBtn">Fit</button>
+        <input type="text" class="search-box" id="searchBox" placeholder="Search...">
+    </div>
+
+    <div class="stats-bar" id="statsBar">
+        <div class="stat"><span class="stat-val" id="statFiles">0</span><span class="stat-lbl">Files</span></div>
+        <div class="stat"><span class="stat-val" id="statData">0</span><span class="stat-lbl">Data</span></div>
+        <div class="stat"><span class="stat-val" id="statEnum">0</span><span class="stat-lbl">Enums</span></div>
+        <div class="stat"><span class="stat-val" id="statList">0</span><span class="stat-lbl">Lists</span></div>
+        <div class="legend">
+            <div class="legend-item"><div class="legend-dot" style="background:#58a6ff"></div>Data Class</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#f78166"></div>Enum</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#3fb950"></div>List</div>
+            <div class="legend-item"><div class="legend-dot" style="background:#8b949e"></div>Primitive</div>
+        </div>
+    </div>
+
+    <div class="main">
+        <div class="graph-viewport" id="viewport">
+            <div class="graph-world" id="world">
+                <svg class="graph-svg" id="svgLayer"></svg>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <div class="sidebar-title">Downstream Files</div>
+            <div class="sidebar-scroll" id="filesContainer"></div>
+            <div class="diff-section">
+                <div style="font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;">Git Diff Simulator</div>
+                <textarea class="diff-input" id="diffInput" placeholder="Paste file paths (one per line)"></textarea>
+                <button class="diff-btn" onclick="checkDiff()">Check</button>
+                <div id="diffResult"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="zoom-controls">
+        <button class="zoom-btn" onclick="zoomIn()">+</button>
+        <button class="zoom-btn" onclick="zoomOut()">-</button>
+        <div class="zoom-label" id="zoomLabel">100%</div>
+        <button class="zoom-btn" onclick="fitToView()">&#8689;</button>
+    </div>
+
+    <script>
+    let treeData = null;
+    let activeEntry = null;
+    let scale = 1;
+    let collapsedNodes = new Set();
+    let nodePositions = [];  // {id, x, y, w, h, node, parentId}
+    let nodeIdCounter = 0;
+
+    // Layout constants
+    const NODE_H = 48;
+    const NODE_PAD_X = 28;
+    const NODE_PAD_Y = 14;
+    const H_GAP = 32;
+    const V_GAP = 56;
+
+    // Embedded data
+    const DEMO_DATA = {"SchemaValidationReport":{"entry_class":"com.example.schemaguard.domain.model.entity.SchemaValidationReport","entry_file":"com/example/schemaguard/domain/model/entity/SchemaValidationReport.kt","downstream_files":["com/example/schemaguard/domain/model/entity/ChangedFileInfo.kt","com/example/schemaguard/domain/model/entity/ErrorSeverity.kt","com/example/schemaguard/domain/model/entity/FieldChange.kt","com/example/schemaguard/domain/model/entity/FieldModification.kt","com/example/schemaguard/domain/model/entity/FileChangeType.kt","com/example/schemaguard/domain/model/entity/FileValidationResult.kt","com/example/schemaguard/domain/model/entity/ReportSummary.kt","com/example/schemaguard/domain/model/entity/SchemaDiff.kt","com/example/schemaguard/domain/model/entity/SchemaDiffType.kt","com/example/schemaguard/domain/model/entity/SchemaValidationReport.kt","com/example/schemaguard/domain/model/entity/ValidationError.kt","com/example/schemaguard/domain/model/entity/ValidationStatus.kt","com/example/schemaguard/domain/model/entity/ValidationWarning.kt"],"tree":{"class":"SchemaValidationReport","qualified_name":"com.example.schemaguard.domain.model.entity.SchemaValidationReport","kind":"DATA_CLASS","source_file":"com/example/schemaguard/domain/model/entity/SchemaValidationReport.kt","children":[{"class":"overallStatus: ValidationStatus","qualified_name":"com.example.schemaguard.domain.model.entity.ValidationStatus","kind":"ENUM","source_file":"com/example/schemaguard/domain/model/entity/ValidationStatus.kt"},{"class":"summary: ReportSummary","qualified_name":"com.example.schemaguard.domain.model.entity.ReportSummary","kind":"DATA_CLASS","source_file":"com/example/schemaguard/domain/model/entity/ReportSummary.kt"},{"class":"fileResults: List<FileValidationResult>","qualified_name":"com.example.schemaguard.domain.model.entity.FileValidationResult","kind":"LIST","source_file":"com/example/schemaguard/domain/model/entity/FileValidationResult.kt","children":[{"class":"status: ValidationStatus","qualified_name":"com.example.schemaguard.domain.model.entity.ValidationStatus","kind":"ENUM","source_file":"com/example/schemaguard/domain/model/entity/ValidationStatus.kt"},{"class":"errors: List<ValidationError>","qualified_name":"com.example.schemaguard.domain.model.entity.ValidationError","kind":"LIST","source_file":"com/example/schemaguard/domain/model/entity/ValidationError.kt","children":[{"class":"severity: ErrorSeverity","qualified_name":"com.example.schemaguard.domain.model.entity.ErrorSeverity","kind":"ENUM","source_file":"com/example/schemaguard/domain/model/entity/ErrorSeverity.kt"}]},{"class":"warnings: List<ValidationWarning>","qualified_name":"com.example.schemaguard.domain.model.entity.ValidationWarning","kind":"LIST","source_file":"com/example/schemaguard/domain/model/entity/ValidationWarning.kt"}]},{"class":"changedFiles: List<ChangedFileInfo>","qualified_name":"com.example.schemaguard.domain.model.entity.ChangedFileInfo","kind":"LIST","source_file":"com/example/schemaguard/domain/model/entity/ChangedFileInfo.kt","children":[{"class":"changeType: FileChangeType","qualified_name":"com.example.schemaguard.domain.model.entity.FileChangeType","kind":"ENUM","source_file":"com/example/schemaguard/domain/model/entity/FileChangeType.kt"}]},{"class":"schemaDiffs: List<SchemaDiff>","qualified_name":"com.example.schemaguard.domain.model.entity.SchemaDiff","kind":"LIST","source_file":"com/example/schemaguard/domain/model/entity/SchemaDiff.kt","children":[{"class":"diffType: SchemaDiffType","qualified_name":"com.example.schemaguard.domain.model.entity.SchemaDiffType","kind":"ENUM","source_file":"com/example/schemaguard/domain/model/entity/SchemaDiffType.kt"},{"class":"addedFields: List<FieldChange>","qualified_name":"com.example.schemaguard.domain.model.entity.FieldChange","kind":"LIST","source_file":"com/example/schemaguard/domain/model/entity/FieldChange.kt"},{"class":"removedFields: List<FieldChange>","qualified_name":"com.example.schemaguard.domain.model.entity.FieldChange","kind":"LIST","source_file":"com/example/schemaguard/domain/model/entity/FieldChange.kt"},{"class":"modifiedFields: List<FieldModification>","qualified_name":"com.example.schemaguard.domain.model.entity.FieldModification","kind":"LIST","source_file":"com/example/schemaguard/domain/model/entity/FieldModification.kt"}]}]}}};
+
+    // ─── Load file ───
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try { treeData = JSON.parse(ev.target.result); init(); }
+            catch (err) { alert('Invalid JSON: ' + err.message); }
+        };
+        reader.readAsText(file);
+    });
+
+    function init() {
+        if (!treeData) return;
+        const entries = Object.keys(treeData);
+        renderTabs(entries);
+        if (entries.length > 0) selectEntry(entries[0]);
+    }
+
+    function renderTabs(entries) {
+        const container = document.getElementById('tabs');
+        container.innerHTML = '';
+        entries.forEach(name => {
+            const btn = document.createElement('button');
+            btn.className = 'tab-btn';
+            btn.textContent = name;
+            btn.onclick = () => selectEntry(name);
+            container.appendChild(btn);
+        });
+    }
+
+    function selectEntry(name) {
+        activeEntry = name;
+        collapsedNodes.clear();
+        document.querySelectorAll('.tab-btn').forEach(t =>
+            t.classList.toggle('active', t.textContent === name));
+        const entry = treeData[name];
+        updateStats(entry);
+        renderGraph(entry.tree);
+        renderFiles(entry.downstream_files);
+        document.getElementById('diffResult').innerHTML = '';
+        requestAnimationFrame(() => fitToView());
+    }
+
+    function updateStats(entry) {
+        const files = entry.downstream_files || [];
+        document.getElementById('statFiles').textContent = files.length;
+        document.getElementById('statData').textContent = countKind(entry.tree, 'DATA_CLASS');
+        document.getElementById('statEnum').textContent = countKind(entry.tree, 'ENUM');
+        document.getElementById('statList').textContent = countKind(entry.tree, 'LIST');
+    }
+
+    function countKind(node, kind) {
+        let c = node.kind === kind ? 1 : 0;
+        (node.children || []).forEach(ch => c += countKind(ch, kind));
+        return c;
+    }
+
+    // ─── Graph Layout ───
+
+    function measureNode(node) {
+        const name = node['class'] || '';
+        const charW = 7.5;
+        const textW = name.length * charW;
+        return { w: Math.max(140, textW + NODE_PAD_X * 2 + 36), h: NODE_H };
+    }
+
+    // Compute subtree width recursively
+    function computeSubtreeWidth(node) {
+        const size = measureNode(node);
+        const children = (node.children || []);
+        const isCollapsed = collapsedNodes.has(node._id);
+
+        if (children.length === 0 || isCollapsed) {
+            node._subtreeW = size.w;
+            node._nodeW = size.w;
+            node._nodeH = size.h;
+            return size.w;
+        }
+
+        let totalChildW = 0;
+        children.forEach((ch, i) => {
+            totalChildW += computeSubtreeWidth(ch);
+            if (i < children.length - 1) totalChildW += H_GAP;
+        });
+
+        node._subtreeW = Math.max(size.w, totalChildW);
+        node._nodeW = size.w;
+        node._nodeH = size.h;
+        return node._subtreeW;
+    }
+
+    // Assign positions top-down
+    function assignPositions(node, cx, y, positions, parentId) {
+        const w = node._nodeW;
+        const h = node._nodeH;
+        const x = cx - w / 2;
+
+        positions.push({
+            id: node._id, x, y, w, h, node, parentId,
+            cx: cx, cy: y + h / 2
+        });
+
+        const children = (node.children || []);
+        const isCollapsed = collapsedNodes.has(node._id);
+        if (children.length === 0 || isCollapsed) return;
+
+        let totalChildW = 0;
+        children.forEach((ch, i) => {
+            totalChildW += ch._subtreeW;
+            if (i < children.length - 1) totalChildW += H_GAP;
+        });
+
+        let childX = cx - totalChildW / 2;
+        const childY = y + h + V_GAP;
+
+        children.forEach((ch, i) => {
+            const childCx = childX + ch._subtreeW / 2;
+            assignPositions(ch, childCx, childY, positions, node._id);
+            childX += ch._subtreeW + H_GAP;
+        });
+    }
+
+    // Assign IDs
+    function assignIds(node) {
+        node._id = nodeIdCounter++;
+        (node.children || []).forEach(ch => assignIds(ch));
+    }
+
+    function renderGraph(tree) {
+        nodeIdCounter = 0;
+        assignIds(tree);
+        computeSubtreeWidth(tree);
+
+        nodePositions = [];
+        assignPositions(tree, 0, 0, nodePositions, null);
+
+        // Normalize positions so min x,y = 0
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        nodePositions.forEach(p => {
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x + p.w > maxX) maxX = p.x + p.w;
+            if (p.y + p.h > maxY) maxY = p.y + p.h;
+        });
+        nodePositions.forEach(p => {
+            p.x -= minX;
+            p.y -= minY;
+            p.cx -= minX;
+            p.cy -= minY;
+        });
+
+        const worldW = (maxX - minX) + 80;
+        const worldH = (maxY - minY) + 80;
+
+        const world = document.getElementById('world');
+        world.style.width = worldW + 'px';
+        world.style.height = worldH + 'px';
+
+        // Clear old nodes (keep SVG)
+        world.querySelectorAll('.graph-node').forEach(n => n.remove());
+
+        const svg = document.getElementById('svgLayer');
+        svg.setAttribute('width', worldW);
+        svg.setAttribute('height', worldH);
+        svg.innerHTML = '';
+
+        // Draw edges
+        const posMap = {};
+        nodePositions.forEach(p => posMap[p.id] = p);
+
+        nodePositions.forEach(p => {
+            if (p.parentId === null) return;
+            const parent = posMap[p.parentId];
+            if (!parent) return;
+
+            const x1 = parent.cx;
+            const y1 = parent.y + parent.h;
+            const x2 = p.cx;
+            const y2 = p.y;
+            const midY = y1 + (y2 - y1) / 2;
+
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('d', `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`);
+            path.dataset.from = p.parentId;
+            path.dataset.to = p.id;
+            svg.appendChild(path);
+        });
+
+        // Draw nodes
+        nodePositions.forEach(p => {
+            const div = document.createElement('div');
+            const kindMap = {
+                'DATA_CLASS': ['D', 'badge-data', 'kind-data'],
+                'ENUM': ['E', 'badge-enum', 'kind-enum'],
+                'LIST': ['L', 'badge-list', 'kind-list'],
+                'PRIMITIVE': ['P', 'badge-prim', 'kind-prim'],
+                'UNKNOWN': ['?', 'badge-prim', 'kind-prim']
+            };
+            const [letter, badgeClass, kindClass] = kindMap[p.node.kind] || ['?', 'badge-prim', 'kind-prim'];
+            const hasChildren = (p.node.children || []).length > 0;
+            const isCollapsed = collapsedNodes.has(p.id);
+            const isRoot = p.parentId === null;
+
+            div.className = 'graph-node ' + kindClass
+                + (isRoot ? ' root-node' : '')
+                + (isCollapsed ? ' collapsed-node' : '');
+            div.style.left = p.x + 'px';
+            div.style.top = p.y + 'px';
+            div.dataset.id = p.id;
+            div.dataset.file = p.node.source_file || '';
+            div.dataset.name = (p.node['class'] || '') + ' ' + (p.node.qualified_name || '');
+
+            // Badge
+            const badge = document.createElement('div');
+            badge.className = 'node-badge ' + badgeClass;
+            badge.textContent = letter;
+            div.appendChild(badge);
+
+            // Info
+            const info = document.createElement('div');
+            info.className = 'node-info';
+
+            const nameEl = document.createElement('div');
+            nameEl.className = 'node-name';
+            nameEl.textContent = p.node['class'] || '';
+            info.appendChild(nameEl);
+
+            if (p.node.source_file && p.node.source_file !== '(primitive)') {
+                const fileEl = document.createElement('div');
+                fileEl.className = 'node-file';
+                fileEl.textContent = p.node.source_file.split('/').pop();
+                info.appendChild(fileEl);
+            }
+            div.appendChild(info);
+
+            // Expand/collapse indicator
+            if (hasChildren) {
+                const exp = document.createElement('div');
+                exp.className = 'node-expand';
+                exp.textContent = isCollapsed ? '+' : '\u2212';
+                div.appendChild(exp);
+
+                div.addEventListener('click', () => {
+                    if (collapsedNodes.has(p.id)) {
+                        collapsedNodes.delete(p.id);
+                    } else {
+                        collapsedNodes.add(p.id);
+                    }
+                    renderGraph(tree);
+                });
+            }
+
+            // Hover: highlight edges
+            div.addEventListener('mouseenter', () => {
+                svg.querySelectorAll('path').forEach(path => {
+                    if (path.dataset.from == p.id || path.dataset.to == p.id) {
+                        path.classList.add('edge-highlight');
+                    }
+                });
+            });
+            div.addEventListener('mouseleave', () => {
+                svg.querySelectorAll('path').forEach(path => {
+                    path.classList.remove('edge-highlight');
+                });
+            });
+
+            world.appendChild(div);
+        });
+    }
+
+    // ─── Files Panel ───
+
+    function renderFiles(files) {
+        const container = document.getElementById('filesContainer');
+        container.innerHTML = '';
+        if (!files || files.length === 0) {
+            container.innerHTML = '<div style="color:#484f58;font-size:12px;padding:8px;">No files</div>';
+            return;
+        }
+        files.forEach(f => {
+            const item = document.createElement('div');
+            item.className = 'file-item';
+            item.dataset.path = f;
+            const dot = document.createElement('div');
+            dot.className = 'file-dot ' + (/Status|Type|Severity|Level|Kind|Mode/.test(f) ? 'dot-enum' : 'dot-data');
+            item.appendChild(dot);
+            const span = document.createElement('span');
+            span.className = 'file-short';
+            span.textContent = f.split('/').pop();
+            item.appendChild(span);
+            container.appendChild(item);
+        });
+    }
+
+    // ─── Search ───
+
+    document.getElementById('searchBox').addEventListener('input', (e) => {
+        const q = e.target.value.toLowerCase();
+        document.querySelectorAll('.graph-node').forEach(n => {
+            const name = (n.dataset.name || '').toLowerCase();
+            const file = (n.dataset.file || '').toLowerCase();
+            n.classList.toggle('highlight', q && (name.includes(q) || file.includes(q)));
+        });
+        document.querySelectorAll('.file-item').forEach(item => {
+            const path = (item.dataset.path || '').toLowerCase();
+            item.classList.toggle('matched', q && path.includes(q));
+        });
+    });
+
+    // ─── Expand / Collapse All ───
+
+    function getAllNodeIds(node) {
+        let ids = [node._id];
+        (node.children || []).forEach(ch => ids = ids.concat(getAllNodeIds(ch)));
+        return ids;
+    }
+
+    document.getElementById('expandAllBtn').addEventListener('click', () => {
+        collapsedNodes.clear();
+        if (treeData && activeEntry) renderGraph(treeData[activeEntry].tree);
+        requestAnimationFrame(() => fitToView());
+    });
+
+    document.getElementById('collapseAllBtn').addEventListener('click', () => {
+        if (!treeData || !activeEntry) return;
+        const tree = treeData[activeEntry].tree;
+        const allIds = getAllNodeIds(tree);
+        // Collapse all except root
+        allIds.forEach(id => { if (id !== tree._id) collapsedNodes.add(id); });
+        // Only collapse nodes that have children
+        collapsedNodes.clear();
+        collapseAllWithChildren(tree);
+        renderGraph(tree);
+        requestAnimationFrame(() => fitToView());
+    });
+
+    function collapseAllWithChildren(node) {
+        if ((node.children || []).length > 0) {
+            collapsedNodes.add(node._id);
+            node.children.forEach(ch => collapseAllWithChildren(ch));
+        }
+    }
+
+    // ─── Zoom & Pan ───
+
+    function applyZoom() {
+        const world = document.getElementById('world');
+        world.style.transform = `scale(${scale})`;
+        document.getElementById('zoomLabel').textContent = Math.round(scale * 100) + '%';
+    }
+
+    function zoomIn() { scale = Math.min(2, scale + 0.15); applyZoom(); }
+    function zoomOut() { scale = Math.max(0.2, scale - 0.15); applyZoom(); }
+
+    function fitToView() {
+        const viewport = document.getElementById('viewport');
+        const world = document.getElementById('world');
+        const vw = viewport.clientWidth;
+        const vh = viewport.clientHeight;
+        const ww = parseFloat(world.style.width) || vw;
+        const wh = parseFloat(world.style.height) || vh;
+
+        const scaleX = (vw - 40) / ww;
+        const scaleY = (vh - 40) / wh;
+        scale = Math.min(1, Math.min(scaleX, scaleY));
+        scale = Math.max(0.2, scale);
+        applyZoom();
+
+        // Center
+        const scaledW = ww * scale;
+        const scaledH = wh * scale;
+        viewport.scrollLeft = Math.max(0, (scaledW - vw) / 2);
+        viewport.scrollTop = Math.max(0, (scaledH - vh) / 2);
+    }
+
+    document.getElementById('fitBtn').addEventListener('click', () => fitToView());
+
+    // Mouse wheel zoom
+    document.getElementById('viewport').addEventListener('wheel', (e) => {
+        if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            const delta = e.deltaY > 0 ? -0.08 : 0.08;
+            scale = Math.max(0.2, Math.min(2, scale + delta));
+            applyZoom();
+        }
+    }, { passive: false });
+
+    // ─── Git Diff ───
+
+    function checkDiff() {
+        const input = document.getElementById('diffInput').value.trim();
+        const resultDiv = document.getElementById('diffResult');
+        if (!input || !treeData || !activeEntry) { resultDiv.innerHTML = ''; return; }
+
+        const changedFiles = input.split('\n').map(l => l.trim()).filter(Boolean);
+        const entry = treeData[activeEntry];
+        const downstream = entry.downstream_files || [];
+
+        const matches = [];
+        changedFiles.forEach(changed => {
+            downstream.forEach(dep => {
+                if (changed.includes(dep.split('/').pop()) || dep.includes(changed.split('/').pop())) {
+                    matches.push({ changed, matched: dep });
+                }
+            });
+        });
+
+        document.querySelectorAll('.file-item').forEach(item => {
+            item.classList.toggle('matched', matches.some(m => m.matched === item.dataset.path));
+        });
+
+        document.querySelectorAll('.graph-node').forEach(n => {
+            const file = n.dataset.file || '';
+            n.classList.toggle('highlight', matches.some(m =>
+                m.matched === file || file.endsWith(m.matched.split('/').pop())));
+        });
+
+        // Highlight matching edges
+        document.querySelectorAll('.graph-svg path').forEach(path => {
+            const toId = path.dataset.to;
+            const matchedNode = document.querySelector(`.graph-node[data-id="${toId}"]`);
+            if (matchedNode && matchedNode.classList.contains('highlight')) {
+                path.classList.add('edge-highlight');
+            } else {
+                path.classList.remove('edge-highlight');
+            }
+        });
+
+        if (matches.length > 0) {
+            let html = `<div class="diff-result diff-match"><strong>MATCH</strong> — Regeneration needed!<br>`;
+            matches.forEach(m => html += `<code>${m.changed.split('/').pop()}</code> \u2192 <code>${m.matched.split('/').pop()}</code><br>`);
+            html += `</div>`;
+            resultDiv.innerHTML = html;
+        } else {
+            resultDiv.innerHTML = `<div class="diff-result diff-no-match"><strong>NO MATCH</strong></div>`;
+        }
+    }
+
+    // Init
+    if (DEMO_DATA) { treeData = DEMO_DATA; init(); }
+    </script>
+</body>
+</html>

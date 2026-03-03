@@ -11,7 +11,6 @@ import com.google.gson.annotations.SerializedName
 @GenerateJsonSchema
 data class SchemaValidationReport(
     @SerializedName("report_id") val reportId: String,
-    @SerializedName("new_field") val newfield: String,
     @SerializedName("run_timestamp") val runTimestamp: Long,
     @SerializedName("commit_sha") val commitSha: String,
     @SerializedName("branch") val branch: String,

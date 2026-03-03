@@ -12,6 +12,7 @@ import com.google.gson.annotations.SerializedName
 data class SchemaValidationReport(
     @SerializedName("report_id") val reportId: String,
     @SerializedName("run_timestamp") val runTimestamp: Long,
+    @SerializedName("check") val check: Long,
     @SerializedName("commit_sha") val commitSha: String,
     @SerializedName("branch") val branch: String,
     @SerializedName("repository_url") val repositoryUrl: String,

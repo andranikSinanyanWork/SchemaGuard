@@ -179,7 +179,7 @@ jobs:
           # Commit message with context
           MSG="Update schema_trees.json from ${{ github.repository }}@${{ github.sha }}"
 
-          curl -s -X PUT \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
             -H "Authorization: Bearer ${{ secrets.STORAGE_REPO_TOKEN }}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ env.STORAGE_REPO }}/contents/${{ env.TREE_PATH }}" \
@@ -187,9 +187,18 @@ jobs:
               \"message\": \"$MSG\",
               $SHA_FIELD
               \"content\": \"$CONTENT\"
-            }"
+            }")
 
-          echo "Pushed updated tree to ${{ env.STORAGE_REPO }}"
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+            echo "Pushed updated tree to ${{ env.STORAGE_REPO }}"
+          else
+            echo "FAILED to push tree (HTTP $HTTP_CODE):"
+            echo "$BODY"
+            exit 1
+          fi
 
       # ── Step 6: Upload schemas as artifact ──
       - name: Upload schemas

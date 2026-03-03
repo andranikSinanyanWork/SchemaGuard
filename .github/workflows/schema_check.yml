@@ -1,0 +1,229 @@
+name: Schema Guard
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  STORAGE_REPO: andranikSinanyanWork/SchemaGuard-Storage
+  TREE_PATH: trees/schema_trees.json
+
+jobs:
+  schema-check:
+    name: Check & Generate Schemas
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      # ── Step 1: Get changed files ──
+      - name: Get changed files
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          else
+            FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          fi
+          echo "Changed files:"
+          echo "$FILES"
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # ── Step 2: Fetch tree from SchemaGuard-Storage repo ──
+      - name: Fetch schema tree from storage
+        id: fetch_tree
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.STORAGE_REPO_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ env.STORAGE_REPO }}/contents/${{ env.TREE_PATH }}")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "$BODY" | python3 -c "
+          import json, sys, base64
+          data = json.load(sys.stdin)
+          content = base64.b64decode(data['content']).decode('utf-8')
+          with open('/tmp/schema_trees.json', 'w') as f:
+              f.write(content)
+          with open('/tmp/tree_sha.txt', 'w') as f:
+              f.write(data['sha'])
+            "
+            SHA=$(cat /tmp/tree_sha.txt)
+            echo "sha=$SHA" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "Tree fetched from storage repo (sha: $SHA)"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No tree in storage yet (HTTP $HTTP_CODE) — will generate fresh"
+          fi
+
+      # ── Step 3: Compare changed files against the tree ──
+      - name: Check if changes affect schema tree
+        id: check
+        run: |
+          if [ "${{ steps.fetch_tree.outputs.found }}" != "true" ]; then
+            echo "No tree found — will generate fresh"
+            echo "match=true" >> $GITHUB_OUTPUT
+            echo "reason=First run — no schema tree in storage yet" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          CHANGED='${{ steps.changed.outputs.files }}'
+          if [ -z "$CHANGED" ]; then
+            echo "No changed files"
+            echo "match=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          MATCH_RESULT=$(CHANGED="$CHANGED" python3 << 'PYEOF'
+          import json, os
+
+          with open("/tmp/schema_trees.json") as f:
+              data = json.load(f)
+
+          changed = [c.strip() for c in os.environ["CHANGED"].strip().split('\n') if c.strip()]
+          matches = []
+
+          for entry_name, entry in data.items():
+              downstream = entry.get("downstream_files", [])
+              for changed_file in changed:
+                  changed_short = changed_file.split('/')[-1]
+                  for dep in downstream:
+                      dep_short = dep.split('/')[-1]
+                      if changed_short == dep_short:
+                          matches.append(f"{changed_file} -> {entry_name}::{dep_short}")
+
+          if matches:
+              print("MATCH")
+              for m in matches:
+                  print(f"  {m}")
+          else:
+              print("NO_MATCH")
+          PYEOF
+          )
+
+          echo "$MATCH_RESULT"
+
+          if echo "$MATCH_RESULT" | grep -q "MATCH" && ! echo "$MATCH_RESULT" | grep -q "NO_MATCH"; then
+            echo "match=true" >> $GITHUB_OUTPUT
+            echo "reason<<EOF" >> $GITHUB_OUTPUT
+            echo "$MATCH_RESULT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "match=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ── Step 4: Generate schemas + rebuild tree ──
+      - name: Generate schemas
+        if: steps.check.outputs.match == 'true'
+        run: |
+          echo "=== Match detected — running schema generators ==="
+          chmod +x gradlew
+          ./gradlew generateSchemas
+          ./gradlew buildDependencyTree --args="--save --output=tools"
+
+          # Gradle saves to app/tools/ — copy to tools/
+          if [ -f "app/tools/schema_trees.json" ]; then
+            cp app/tools/schema_trees.json tools/schema_trees.json
+          fi
+
+      # ── Step 5: Push updated tree to SchemaGuard-Storage ──
+      - name: Push tree to storage repo
+        if: steps.check.outputs.match == 'true'
+        run: |
+          TREE_FILE="tools/schema_trees.json"
+          if [ ! -f "$TREE_FILE" ]; then
+            echo "No tree file generated — skipping"
+            exit 0
+          fi
+
+          # Base64 encode
+          CONTENT=$(base64 -w 0 "$TREE_FILE")
+
+          # Build SHA field if updating existing file
+          if [ "${{ steps.fetch_tree.outputs.found }}" = "true" ]; then
+            SHA_FIELD="\"sha\": \"${{ steps.fetch_tree.outputs.sha }}\","
+          else
+            SHA_FIELD=""
+          fi
+
+          # Commit message with context
+          MSG="Update schema_trees.json from ${{ github.repository }}@${{ github.sha }}"
+
+          curl -s -X PUT \
+            -H "Authorization: Bearer ${{ secrets.STORAGE_REPO_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ env.STORAGE_REPO }}/contents/${{ env.TREE_PATH }}" \
+            -d "{
+              \"message\": \"$MSG\",
+              $SHA_FIELD
+              \"content\": \"$CONTENT\"
+            }"
+
+          echo "Pushed updated tree to ${{ env.STORAGE_REPO }}"
+
+      # ── Step 6: Upload schemas as artifact ──
+      - name: Upload schemas
+        if: steps.check.outputs.match == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-schemas
+          path: |
+            app/build/generated-schemas/
+            tools/schema_trees.json
+          retention-days: 30
+
+      # ── Step 7: Summary ──
+      - name: Post summary
+        if: always()
+        run: |
+          echo "### Schema Guard" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Changed files:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.changed.outputs.files }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.check.outputs.match }}" = "true" ]; then
+            echo "**Result: MATCH FOUND**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Schemas regenerated. Updated tree pushed to [\`${{ env.STORAGE_REPO }}\`](https://github.com/${{ env.STORAGE_REPO }})." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "${{ steps.check.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Result: NO MATCH**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No schema trees affected. Nothing to do." >> $GITHUB_STEP_SUMMARY
+          fi

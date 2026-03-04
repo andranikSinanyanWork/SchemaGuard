@@ -9,10 +9,12 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  models: read            # needed for GitHub Models AI
 
 env:
   STORAGE_REPO: andranikSinanyanWork/SchemaGuard-Storage
   TREE_PATH: trees/schema_trees.json
+  SCHEMAS_PATH: schemas
 
 jobs:
   schema-check:
@@ -55,7 +57,7 @@ jobs:
           echo "$FILES" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # ── Step 2: Fetch tree from SchemaGuard-Storage repo ──
+      # ── Step 2: Fetch tree from SchemaGuard-Storage ──
       - name: Fetch schema tree from storage
         id: fetch_tree
         run: |
@@ -80,10 +82,10 @@ jobs:
             SHA=$(cat /tmp/tree_sha.txt)
             echo "sha=$SHA" >> $GITHUB_OUTPUT
             echo "found=true" >> $GITHUB_OUTPUT
-            echo "Tree fetched from storage repo (sha: $SHA)"
+            echo "Tree fetched (sha: $SHA)"
           else
             echo "found=false" >> $GITHUB_OUTPUT
-            echo "No tree in storage yet (HTTP $HTTP_CODE) — will generate fresh"
+            echo "No tree in storage yet (HTTP $HTTP_CODE)"
           fi
 
       # ── Step 3: Compare changed files against the tree ──
@@ -94,6 +96,7 @@ jobs:
             echo "No tree found — will generate fresh"
             echo "match=true" >> $GITHUB_OUTPUT
             echo "reason=First run — no schema tree in storage yet" >> $GITHUB_OUTPUT
+            echo "matched_entries=" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -112,6 +115,7 @@ jobs:
 
           changed = [c.strip() for c in os.environ["CHANGED"].strip().split('\n') if c.strip()]
           matches = []
+          matched_entries = set()
 
           for entry_name, entry in data.items():
               downstream = entry.get("downstream_files", [])
@@ -121,11 +125,13 @@ jobs:
                       dep_short = dep.split('/')[-1]
                       if changed_short == dep_short:
                           matches.append(f"{changed_file} -> {entry_name}::{dep_short}")
+                          matched_entries.add(entry_name)
 
           if matches:
               print("MATCH")
               for m in matches:
                   print(f"  {m}")
+              print("ENTRIES:" + ",".join(matched_entries))
           else:
               print("NO_MATCH")
           PYEOF
@@ -133,8 +139,10 @@ jobs:
 
           echo "$MATCH_RESULT"
 
-          if echo "$MATCH_RESULT" | grep -q "MATCH" && ! echo "$MATCH_RESULT" | grep -q "NO_MATCH"; then
+          if echo "$MATCH_RESULT" | grep -q "^MATCH"; then
             echo "match=true" >> $GITHUB_OUTPUT
+            ENTRIES=$(echo "$MATCH_RESULT" | grep "^ENTRIES:" | sed 's/ENTRIES://')
+            echo "matched_entries=$ENTRIES" >> $GITHUB_OUTPUT
             echo "reason<<EOF" >> $GITHUB_OUTPUT
             echo "$MATCH_RESULT" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
@@ -151,56 +159,201 @@ jobs:
           ./gradlew generateSchemas
           ./gradlew buildDependencyTree --args="--save --output=tools"
 
-          # Gradle saves to app/tools/ — copy to tools/
           if [ -f "app/tools/schema_trees.json" ]; then
             cp app/tools/schema_trees.json tools/schema_trees.json
           fi
 
-      # ── Step 5: Push updated tree to SchemaGuard-Storage ──
-      - name: Push tree to storage repo
+      # ── Step 5: AI generates descriptions ──
+      - name: AI - Generate schema descriptions
         if: steps.check.outputs.match == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TREE_FILE="tools/schema_trees.json"
-          if [ ! -f "$TREE_FILE" ]; then
-            echo "No tree file generated — skipping"
+          echo "=== Calling AI for schema descriptions ==="
+
+          SCHEMAS_DIR="app/build/generated-schemas"
+          if [ ! -d "$SCHEMAS_DIR" ]; then
+            echo "No schemas generated — skipping AI"
             exit 0
           fi
 
-          # Base64 encode
-          CONTENT=$(base64 -w 0 "$TREE_FILE")
+          mkdir -p /tmp/ai-schemas
 
-          # Build SHA field if updating existing file
-          if [ "${{ steps.fetch_tree.outputs.found }}" = "true" ]; then
-            SHA_FIELD="\"sha\": \"${{ steps.fetch_tree.outputs.sha }}\","
-          else
-            SHA_FIELD=""
+          for SCHEMA_FILE in "$SCHEMAS_DIR"/*.json; do
+            [ -f "$SCHEMA_FILE" ] || continue
+            FILENAME=$(basename "$SCHEMA_FILE")
+            CLASS_NAME="${FILENAME%.json}"
+            echo "Processing: $CLASS_NAME"
+
+            # Read the schema
+            SCHEMA_CONTENT=$(cat "$SCHEMA_FILE")
+
+            # Read the source file for context
+            SOURCE_FILE=$(find app/src -name "${CLASS_NAME}.kt" -type f | head -1)
+            if [ -n "$SOURCE_FILE" ]; then
+              SOURCE_CONTENT=$(cat "$SOURCE_FILE")
+            else
+              SOURCE_CONTENT="Source file not found"
+            fi
+
+            # Get the git diff for context
+            DIFF_CONTENT=$(git diff HEAD~1 HEAD -- "**/${CLASS_NAME}.kt" 2>/dev/null || echo "No diff available")
+
+            # Build the prompt
+            PROMPT=$(cat << PROMPTEOF
+          You are a JSON Schema documentation expert. I have an Android data class and its generated JSON schema.
+
+          Your job: Add clear "description" fields to EVERY property in the schema.
+          Each description should explain:
+          - What this field represents
+          - What values it can have (for enums)
+          - How it relates to other fields
+          - If this is a recent change, note what changed
+
+          SOURCE CODE:
+          $SOURCE_CONTENT
+
+          RECENT CHANGES:
+          $DIFF_CONTENT
+
+          CURRENT SCHEMA (add descriptions to this):
+          $SCHEMA_CONTENT
+
+          RULES:
+          1. Return ONLY the updated JSON schema with descriptions added
+          2. Keep ALL existing fields — just add "description" to each property
+          3. Keep the exact same structure
+          4. No markdown, no explanation — just valid JSON
+          PROMPTEOF
+          )
+
+            # Escape the prompt for JSON
+            ESCAPED_PROMPT=$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$PROMPT")
+
+            # Call GitHub Models AI
+            AI_RESPONSE=$(curl -s \
+              "https://models.github.ai/inference/chat/completions" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -d "{
+                \"messages\": [{\"role\": \"user\", \"content\": $ESCAPED_PROMPT}],
+                \"model\": \"openai/gpt-4o-mini\"
+              }")
+
+            # Extract the AI response content
+            AI_SCHEMA=$(echo "$AI_RESPONSE" | python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              content = data['choices'][0]['message']['content']
+              # Remove markdown code fences if present
+              content = content.strip()
+              if content.startswith('\`\`\`'):
+                  content = content.split('\n', 1)[1]
+                  content = content.rsplit('\`\`\`', 1)[0]
+              # Validate it's valid JSON
+              parsed = json.loads(content)
+              print(json.dumps(parsed, indent=2))
+          except Exception as e:
+              print(f'AI_ERROR: {e}', file=sys.stderr)
+              sys.exit(1)
+            " 2>/tmp/ai_error.log)
+
+            if [ $? -eq 0 ] && [ -n "$AI_SCHEMA" ]; then
+              echo "$AI_SCHEMA" > "/tmp/ai-schemas/${FILENAME}"
+              echo "  ✓ Descriptions added for $CLASS_NAME"
+            else
+              echo "  ✗ AI failed for $CLASS_NAME — using original schema"
+              cp "$SCHEMA_FILE" "/tmp/ai-schemas/${FILENAME}"
+              cat /tmp/ai_error.log 2>/dev/null
+            fi
+          done
+
+          # Copy AI-enhanced schemas back
+          cp /tmp/ai-schemas/*.json "$SCHEMAS_DIR/" 2>/dev/null || true
+          echo "=== AI descriptions complete ==="
+
+      # ── Step 6: Push tree + schemas to SchemaGuard-Storage ──
+      - name: Push tree to storage repo
+        if: steps.check.outputs.match == 'true'
+        run: |
+          # ── Push schema_trees.json ──
+          TREE_FILE="tools/schema_trees.json"
+          if [ -f "$TREE_FILE" ]; then
+            CONTENT=$(base64 -w 0 "$TREE_FILE")
+
+            if [ "${{ steps.fetch_tree.outputs.found }}" = "true" ]; then
+              SHA_FIELD="\"sha\": \"${{ steps.fetch_tree.outputs.sha }}\","
+            else
+              SHA_FIELD=""
+            fi
+
+            MSG="Update schema_trees.json from ${{ github.repository }}@${GITHUB_SHA::7}"
+
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+              -H "Authorization: Bearer ${{ secrets.STORAGE_REPO_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ env.STORAGE_REPO }}/contents/${{ env.TREE_PATH }}" \
+              -d "{
+                \"message\": \"$MSG\",
+                $SHA_FIELD
+                \"content\": \"$CONTENT\"
+              }")
+
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+              echo "✓ Tree pushed to storage"
+            else
+              echo "✗ Tree push failed (HTTP $HTTP_CODE)"
+              echo "$RESPONSE" | sed '$d'
+              exit 1
+            fi
           fi
 
-          # Commit message with context
-          MSG="Update schema_trees.json from ${{ github.repository }}@${{ github.sha }}"
+          # ── Push each schema file ──
+          SCHEMAS_DIR="app/build/generated-schemas"
+          if [ -d "$SCHEMAS_DIR" ]; then
+            for SCHEMA_FILE in "$SCHEMAS_DIR"/*.json; do
+              [ -f "$SCHEMA_FILE" ] || continue
+              FILENAME=$(basename "$SCHEMA_FILE")
+              CONTENT=$(base64 -w 0 "$SCHEMA_FILE")
+              REMOTE_PATH="${{ env.SCHEMAS_PATH }}/$FILENAME"
 
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-            -H "Authorization: Bearer ${{ secrets.STORAGE_REPO_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ env.STORAGE_REPO }}/contents/${{ env.TREE_PATH }}" \
-            -d "{
-              \"message\": \"$MSG\",
-              $SHA_FIELD
-              \"content\": \"$CONTENT\"
-            }")
+              # Check if file exists to get SHA
+              EXISTING=$(curl -s \
+                -H "Authorization: Bearer ${{ secrets.STORAGE_REPO_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ env.STORAGE_REPO }}/contents/$REMOTE_PATH")
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
+              EXISTING_SHA=$(echo "$EXISTING" | python3 -c "import json,sys; print(json.load(sys.stdin).get('sha',''))" 2>/dev/null || echo "")
+              if [ -n "$EXISTING_SHA" ]; then
+                SHA_FIELD="\"sha\": \"$EXISTING_SHA\","
+              else
+                SHA_FIELD=""
+              fi
 
-          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
-            echo "Pushed updated tree to ${{ env.STORAGE_REPO }}"
-          else
-            echo "FAILED to push tree (HTTP $HTTP_CODE):"
-            echo "$BODY"
-            exit 1
+              MSG="Update $FILENAME from ${{ github.repository }}@${GITHUB_SHA::7}"
+
+              RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+                -H "Authorization: Bearer ${{ secrets.STORAGE_REPO_TOKEN }}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ env.STORAGE_REPO }}/contents/$REMOTE_PATH" \
+                -d "{
+                  \"message\": \"$MSG\",
+                  $SHA_FIELD
+                  \"content\": \"$CONTENT\"
+                }")
+
+              HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+              if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+                echo "✓ Pushed $FILENAME"
+              else
+                echo "✗ Failed $FILENAME (HTTP $HTTP_CODE)"
+              fi
+            done
           fi
 
-      # ── Step 6: Upload schemas as artifact ──
+      # ── Step 7: Upload artifacts ──
       - name: Upload schemas
         if: steps.check.outputs.match == 'true'
         uses: actions/upload-artifact@v4
@@ -211,7 +364,7 @@ jobs:
             tools/schema_trees.json
           retention-days: 30
 
-      # ── Step 7: Summary ──
+      # ── Step 8: Summary ──
       - name: Post summary
         if: always()
         run: |
@@ -224,15 +377,16 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ "${{ steps.check.outputs.match }}" = "true" ]; then
-            echo "**Result: MATCH FOUND**" >> $GITHUB_STEP_SUMMARY
+            echo "**Result: MATCH FOUND** ✅" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Schemas regenerated. Updated tree pushed to [\`${{ env.STORAGE_REPO }}\`](https://github.com/${{ env.STORAGE_REPO }})." >> $GITHUB_STEP_SUMMARY
+            echo "Schemas regenerated with AI descriptions." >> $GITHUB_STEP_SUMMARY
+            echo "Updated in [\`${{ env.STORAGE_REPO }}\`](https://github.com/${{ env.STORAGE_REPO }})." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Matched entries:** \`${{ steps.check.outputs.matched_entries }}\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             echo "${{ steps.check.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           else
-            echo "**Result: NO MATCH**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "No schema trees affected. Nothing to do." >> $GITHUB_STEP_SUMMARY
+            echo "**Result: NO MATCH** — nothing to do." >> $GITHUB_STEP_SUMMARY
           fi
